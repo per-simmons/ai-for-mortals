@@ -9,6 +9,7 @@ import rehypeStringify from "rehype-stringify"
 import { format } from "date-fns"
 
 const postsDirectory = path.join(process.cwd(), "content/blog")
+const publicImagesDirectory = path.join(process.cwd(), "public/images")
 
 export type PostMetadata = {
   slug: string
@@ -61,6 +62,23 @@ export function getPostSlugs() {
   }
 }
 
+// Helper function to get the slug from a directory or file path
+function getSlugFromPath(filePath: string): string {
+  // For index.md files in a dated directory, use the directory name (without date prefix)
+  if (path.basename(filePath) === 'index.md') {
+    const dirName = path.basename(path.dirname(filePath))
+    // If directory follows the YYYY-MM-DD-slug format, extract just the slug part
+    const match = dirName.match(/^\d{4}-\d{2}-\d{2}-(.+)$/)
+    if (match && match[1]) {
+      return match[1]
+    }
+    return dirName
+  }
+  
+  // For regular .md files, use the filename without extension
+  return path.basename(filePath, '.md')
+}
+
 export function getPostBySlug(slug: string): Post | null {
   try {
     const realSlug = slug.replace(/\.md$/, "")
@@ -70,17 +88,27 @@ export function getPostBySlug(slug: string): Post | null {
     
     // If file doesn't exist at root level, try to find it in subdirectories
     if (!fs.existsSync(fullPath)) {
-      // Check if the slug might be a directory with an index.md file
-      const indexPath = path.join(postsDirectory, realSlug, 'index.md')
-      if (fs.existsSync(indexPath)) {
-        fullPath = indexPath
+      // Look for directories with a date prefix and the slug
+      const dirs = fs.readdirSync(postsDirectory)
+        .filter(dir => fs.statSync(path.join(postsDirectory, dir)).isDirectory())
+        .filter(dir => {
+          // Match directories with date pattern: YYYY-MM-DD-slug
+          const match = dir.match(/^\d{4}-\d{2}-\d{2}-(.+)$/)
+          return match && match[1] === realSlug
+        })
+      
+      if (dirs.length > 0) {
+        // Use the first matching directory with an index.md file
+        const indexPath = path.join(postsDirectory, dirs[0], 'index.md')
+        if (fs.existsSync(indexPath)) {
+          fullPath = indexPath
+        }
       } else {
         // Try to find the file by matching the slug to the relative path
         const allFiles = getAllFiles(postsDirectory)
         const matchingFile = allFiles.find(file => {
-          // Convert file path to slug (remove extension, replace slashes)
-          const fileSlug = file.replace(/\.md$/, "").replace(/\\/g, "/")
-          return fileSlug === realSlug || path.basename(fileSlug) === realSlug
+          const fileSlug = getSlugFromPath(file)
+          return fileSlug === realSlug
         })
         
         if (matchingFile) {
@@ -105,19 +133,26 @@ export function getPostBySlug(slug: string): Post | null {
       formattedDate = format(date, "MMMM d, yyyy")
     }
 
-    // For index.md files in a directory, use the directory name as the slug
-    let postSlug = realSlug
-    if (path.basename(fullPath) === 'index.md') {
-      postSlug = path.basename(path.dirname(fullPath))
+    // For coverImage, ensure it uses the /images/slug/ format if not already
+    let coverImage = data.coverImage || ""
+    if (coverImage && !coverImage.startsWith('/images/')) {
+      // Extract the slug from the file path or data
+      const postSlug = data.slug || getSlugFromPath(fullPath)
+      
+      // If the coverImage is a relative path, convert it to the public path format
+      if (coverImage.startsWith('./') || !coverImage.startsWith('/')) {
+        const imageName = path.basename(coverImage)
+        coverImage = `/images/${postSlug}/${imageName}`
+      }
     }
 
     return {
-      slug: postSlug,
+      slug: data.slug || getSlugFromPath(fullPath),
       title: data.title || "Untitled Post",
       date: data.date || new Date().toISOString(),
       formattedDate,
       excerpt: data.excerpt || "",
-      coverImage: data.coverImage || "",
+      coverImage,
       author: data.author || "",
       content,
     }
@@ -152,12 +187,23 @@ export function getAllPosts(): PostMetadata[] {
 
 export async function markdownToHtml(markdown: string) {
   try {
+    // Process image paths to ensure they use the public path format
+    const processedMarkdown = markdown.replace(
+      /!\[(.*?)\]\((\.\/images\/.*?)\)/g, 
+      (match, alt, imgPath) => {
+        const imgName = path.basename(imgPath)
+        // Get the post slug from the current context (would need to be passed in)
+        // This is a simplification; you might need a more robust approach
+        return `![${alt}](/images/${imgName})`
+      }
+    )
+
     const result = await unified()
       .use(remarkParse)
       .use(remarkRehype)
       .use(rehypeHighlight)
       .use(rehypeStringify)
-      .process(markdown)
+      .process(processedMarkdown)
 
     return result.toString()
   } catch (error) {
